@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>WebContainer + DeepSeek Agent</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { display: flex; height: 100vh; background: #0a0a0a; color: #00ff41; font-family: 'Courier New', monospace; overflow: hidden; }
+    .chat-panel { width: 50%; display: flex; flex-direction: column; border-right: 1px solid #1a3a1a; }
+    .header { padding: 16px; border-bottom: 1px solid #1a3a1a; font-size: 16px; }
+    .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+    .msg-user, .msg-agent { padding: 8px 12px; border-radius: 4px; }
+    .msg-user { background: #0d1f0d; border-left: 3px solid #00ff41; }
+    .msg-agent { background: #050505; border-left: 3px solid #005500; }
+    .msg-label { font-size: 11px; color: #00aa00; margin-bottom: 4px; }
+    .tool-card { margin-top: 8px; padding: 10px; border: 1px dashed #ffaa00; border-radius: 4px; background: #1a1000; }
+    .tool-title { color: #ffaa00; font-size: 12px; margin-bottom: 6px; }
+    .tool-status { font-size: 11px; color: #00aa00; }
+    .trace-panel { width: 50%; display: flex; flex-direction: column; background: #000; }
+    .trace-header { padding: 16px; border-bottom: 1px solid #1a3a1a; font-size: 16px; }
+    .trace-body { flex: 1; overflow-y: auto; padding: 16px; font-size: 12px; line-height: 1.8; }
+    .trace-line { padding: 2px 0; }
+    .trace-sys { color: #00aa00; } .trace-llm { color: #00ffff; } .trace-mcp { color: #ffaa00; } .trace-sandbox { color: #ff00ff; }
+    .input-area { display: flex; padding: 12px; border-top: 1px solid #1a3a1a; gap: 8px; }
+    input { flex: 1; background: #000; border: 1px solid #1a3a1a; color: #00ff41; padding: 8px; font-family: inherit; outline: none; }
+    button { background: #003300; color: #00ff41; border: 1px solid #00ff41; padding: 8px 16px; cursor: pointer; font-family: inherit; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div class="chat-panel">
+    <div class="header">🤖 MCP Sandbox Agent</div>
+    <div class="messages" id="messages"></div>
+    <div class="input-area">
+      <input id="input" placeholder="让 Agent 写点代码..." />
+      <button id="send">发送</button>
+    </div>
+  </div>
+
+  <div class="trace-panel">
+    <div class="trace-header">📡 Execution Trace</div>
+    <div class="trace-body" id="trace"></div>
+  </div>
+
+  <script type="module">
+    import { WebContainer } from 'https://esm.sh/@webcontainer/api';
+
+    const messagesEl = document.getElementById('messages');
+    const traceEl = document.getElementById('trace');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+
+    let webcontainerInstance = null;
+
+    // ============ 工具函数 ============
+    function addTrace(type, text) {
+      const cls = { sys: 'trace-sys', llm: 'trace-llm', mcp: 'trace-mcp', sandbox: 'trace-sandbox' }[type];
+      const time = new Date().toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = `trace-line ${cls}`;
+      div.textContent = `[${time}] ${text}`;
+      traceEl.appendChild(div);
+      traceEl.scrollTop = traceEl.scrollHeight;
+    }
+
+    function addMessage(role, text) {
+      const wrapper = document.createElement('div');
+      wrapper.className = role === 'user' ? 'msg-user' : 'msg-agent';
+      wrapper.innerHTML = `
+        <div class="msg-label">${role === 'user' ? '[USER]' : '[AGENT]'}</div>
+        <div class="msg-text">${text}</div>
+      `;
+      messagesEl.appendChild(wrapper);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return wrapper;
+    }
+
+    // ============ WebContainer ============
+    async function initWebContainer() {
+      if (webcontainerInstance) return webcontainerInstance;
+      addTrace('sys', '正在启动浏览器沙盒...');
+      webcontainerInstance = await WebContainer.boot();
+      addTrace('sandbox', '沙盒启动完成');
+      return webcontainerInstance;
+    }
+
+    async function executeInSandbox(rawCode) {
+      // 清洗代码
+      const code = rawCode
+        .replace(/^```[a-zA-Z]*\s*/gm, '')
+        .replace(/```\s*$/gm, '')
+        .replace(/，/g, ',').replace(/；/g, ';').replace(/：/g, ':')
+        .replace(/（/g, '(').replace(/）/g, ')')
+        .replace(/【/g, '[').replace(/】/g, ']')
+        .replace(/“/g, '"').replace(/”/g, '"')
+        .replace(/‘/g, "'").replace(/’/g, "'")
+        .replace(/\u3000/g, ' ')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .trim();
+
+      console.log('清洗后的代码:\n', code);
+
+      try {
+        const wc = await initWebContainer();
+        await wc.mount({
+          'index.js': { file: { contents: code } }
+        });
+
+        const process = await wc.spawn('node', ['index.js']);
+        let output = '';
+        process.output.pipeTo(new WritableStream({
+          write(data) {
+            output += data;
+            // 去掉 ANSI 颜色控制字符
+const clean = data.replace(/\x1b\[[0-9;]*m/g, '').trim();
+if (clean) addTrace('sandbox', `[输出] ${clean}`);
+          }
+        }));
+
+        const exitCode = await process.exit;
+        return { success: exitCode === 0, output };
+      } catch (err) {
+        addTrace('sandbox', `[执行失败] ${err.message}`);
+        return { success: false, output: err.message };
+      }
+    }
+
+    // ============ 主流程 ============
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      inputEl.value = '';
+      sendBtn.disabled = true;
+
+      addMessage('user', text);
+      addTrace('sys', '接收到用户输入');
+      addTrace('llm', '意图识别：需要执行代码');
+
+      let agentWrapper = addMessage('agent', '');
+      const agentTextEl = agentWrapper.querySelector('.msg-text');
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: text }] })
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6);
+            if (data === '[DONE]') { addTrace('sandbox', '执行完成'); continue; }
+
+            try {
+              const event = JSON.parse(data);
+              console.log('[EVENT]', event.type, event);
+
+              if (event.type === 'text-delta') {
+                agentTextEl.textContent += event.delta;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
+
+              if (event.type === 'tool-call') {
+                const code = event.args?.code;
+                if (!code) {
+                  addTrace('mcp', '工具调用参数为空，跳过执行');
+                  continue;
+                }
+
+                addTrace('mcp', `调用工具：${event.toolName || 'run_python'}`);
+
+                const card = document.createElement('div');
+                card.className = 'tool-card';
+                card.innerHTML = `
+                  <div class="tool-title">⚡ [MCP] 调用工具：${event.toolName || 'run_python'}</div>
+                  <div class="tool-status">状态：正在下发至沙盒...</div>
+                `;
+                agentWrapper.appendChild(card);
+
+                executeInSandbox(code).then(async (result) => {
+  const statusEl = card.querySelector('.tool-status');
+  statusEl.textContent = `状态：${result.success ? '执行成功' : '执行失败'}`;
+  addTrace('sandbox', `执行结果: ${result.success ? '成功' : '失败'}`);
+
+  // ⚠️ Day 4 新增：把执行结果回传给后端
+  addTrace('llm', '正在请求 LLM 生成总结...');
+
+  try {
+    const followUp = await fetch('/api/tool-result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        originalQuestion: text,
+        toolName: event.toolName || 'run_python',
+        toolArgs: event.args,
+        toolResult: result.output || '(无输出)'
+      })
+    });
+
+    const reader2 = followUp.body.getReader();
+    const decoder2 = new TextDecoder();
+    let buffer2 = '';
+    const summaryTextEl = document.createElement('div');
+    summaryTextEl.style.marginTop = '8px';
+    summaryTextEl.style.color = '#00ff41';
+    agentWrapper.appendChild(summaryTextEl);
+
+    while (true) {
+      const { done, value } = await reader2.read();
+      if (done) break;
+      buffer2 += decoder2.decode(value, { stream: true });
+      const lines = buffer2.split('\n');
+      buffer2 = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(data);
+          if (ev.type === 'text-delta') {
+            summaryTextEl.textContent += ev.delta;
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        } catch (e) {}
+      }
+    }
+    addTrace('llm', '总结生成完成');
+  } catch (err) {
+    addTrace('sys', `回传失败: ${err.message}`);
+  }
+});
+              }
+            } catch (e) { /* 忽略解析错误 */ }
+          }
+        }
+      } catch (err) {
+        addTrace('sys', `请求失败：${err.message}`);
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+  </script>
+</body>
+</html>

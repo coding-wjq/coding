@@ -9,20 +9,26 @@
 - **Agent 多步工具调用**：`用户输入 → LLM 调工具 → 浏览器沙盒执行 → 结果回传 → LLM 总结` 完整闭环。
 - **执行链路可视化**：右侧 Trace 面板实时展示 Agent 的思考过程、工具调用、沙盒执行日志。
 
-## 🏗️ 系统架构
-┌──────────────┐ SSE ┌──────────────┐ HTTP ┌──────────────┐
-│ 前端页面 │ ────────▶ │ 后端 API │ ────────▶ │ DeepSeek │
-│ index.html │ ◀──────── │ server.js │ ◀──────── │ LLM API │
-└──────────────┘ └──────────────┘ └──────────────┘
-│
-│ tool-call
-▼
-┌──────────────────────────────────────────────┐
-│ 浏览器 WebContainer 沙盒（WebAssembly 隔离） │
-│ - 接收 LLM 生成的代码 │
-│ - 在用户本地执行 │
-│ - stdout/stderr 回传到 Trace 面板 │
-└──────────────────────────────────────────────┘
+## 🏛 系统架构
+
+```mermaid
+flowchart LR
+    A[用户输入] --> B[前端页面 index.html]
+    B -->|POST /api/chat| C[后端 API<br>Vercel Serverless]
+    C -->|SSE 流式请求| D[DeepSeek LLM]
+    D -->|返回 tool-call| C
+    C -->|SSE 流式下发| B
+    B -->|代码下发| E[浏览器 WebContainer<br>WebAssembly 隔离沙盒]
+    E -->|stdout/stderr| B
+    B -->|POST /api/tool-result| C
+    C -->|结果回喂 LLM| D
+    D -->|生成总结| C
+    C -->|SSE 流式返回| B
+    B -->|渲染最终回复| A
+```
+
+**核心链路**：
+用户输入 → LLM 意图识别 → 调用 run_python 工具 → 代码下发至浏览器沙盒 → WebContainer 执行 → 结果回传后端 → LLM 生成总结 → 前端渲染最终回复
 
 ## 🛠️ 技术栈
 

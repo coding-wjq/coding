@@ -36,10 +36,11 @@ flowchart LR
 |---|---|
 | 前端 | 原生 HTML/CSS/JS + ESM |
 | 沙盒 | @webcontainer/api |
-| 后端 | Node.js + Express |
+| 后端 | Vercel Serverless Functions（本地调试用 Express） |
 | LLM | DeepSeek Chat Completions API |
+| 工具调用 | 手动实现 OpenAI 兼容的 tool_calls 协议 |
 | 通信 | SSE（Server-Sent Events）流式传输 |
-| 工具协议 | OpenAI Function Calling 格式 |
+| 部署 | GitHub + Vercel 自动部署 |
 
 ## 🚀 快速开始
 
